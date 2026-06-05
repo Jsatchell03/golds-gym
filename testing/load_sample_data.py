@@ -341,4 +341,25 @@ def add_sample_location_docs(count):
     batch.commit()
 
 
-add_sample_location_docs(25)
+print(
+    {
+        "address": random_address(),
+        "phone_number": random_phone_number(),
+        "machines": random.sample(machines, random.randint(5, len(machines))),
+        "amenities": random.sample(amenities, random.randint(1, len(amenities))),
+        "hours": (
+            {}
+            if random.randint(0, 2) == 0
+            else {
+                "sunday": {"open_time": 400, "close_time": 2200},
+                "monday": {"open_time": 400, "close_time": 2200},
+                "tuesday": {"open_time": 400, "close_time": 2200},
+                "wednesday": {"open_time": 400, "close_time": 2200},
+                "thursday": {"open_time": 400, "close_time": 2200},
+                "friday": {"open_time": 400, "close_time": 2200},
+                "saturday": {"open_time": 400, "close_time": 2200},
+            }
+        ),
+        "classes": random_classes(),
+    }
+)

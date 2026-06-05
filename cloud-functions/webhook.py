@@ -1,131 +1,199 @@
 import functions_framework
 from flask import jsonify
+from google.cloud import firestore
+import re
+import os
+from dotenv import load_dotenv
 
-PROJECT_ID = "golds-gym-492816"
-AGENT_ID = "5722b372-1354-49f1-8704-bb991c25a041"
-LOCATION = "global"
-FLOW_IDS = {"activate_membership": "bd5fe207-7700-4a1b-88cc-d728ef66e2c4"}
-PAGE_IDS = {"collect_user_information": "8a482c09-e929-470e-b519-2447d00dff5c"}
+load_dotenv()
+
+PROJECT_ID = os.getenv("PROJECT_ID")
+db = firestore.Client(project=PROJECT_ID) if PROJECT_ID else firestore.Client()
 
 
+# ---------------------------
+# Entry Point
+# ---------------------------
 @functions_framework.http
 def cx_webhook(request):
-    """Dialogflow CX Webhook Entry Point."""
     req = request.get_json(silent=True, force=True)
-
-    # Extract the webhook tag
     tag = req.get("fulfillmentInfo", {}).get("tag", "")
 
-    # Route to handler based on tag
-    if tag == "activate_membership":
-        return activate_membership(req)
-    elif tag == "deactivate_membership":
-        return deactivate_membership(req)
-    elif tag == "authenticate":
+    if tag == "authenticate":
         return handle_authenticate(req)
-    elif tag == "update_member_details":
-        return update_member_details(req)
+    elif tag == "activate_membership":
+        return handle_activate_membership(req)
+    elif tag == "deactivate_membership":
+        return handle_deactivate_membership(req)
     else:
         return handle_default(req)
 
 
-def activate_membership(req):
-    """Reactivate existing user's membership and create new user memberships."""
-    # Extract session parameters
+# ---------------------------
+# Helpers
+# ---------------------------
+def normalize_email(email):
+    return email.strip().lower() if email else ""
+
+
+def normalize_phone(phone):
+    return re.sub(r"\D", "", phone) if phone else ""
+
+
+def find_member(email, phone):
+    members = db.collection("members")
+    query = (
+        members.where("email", "==", email).where("phone_number", "==", phone).limit(1)
+    )
+    docs = list(query.stream())
+    return docs[0] if docs else None
+
+
+def simple_response(text):
+    return {"fulfillmentResponse": {"messages": [{"text": {"text": [text]}}]}}
+
+
+# ---------------------------
+# Handlers
+# ---------------------------
+def handle_authenticate(req):
     session_params = req.get("sessionInfo", {}).get("parameters", {})
-    email = session_params.get("email", None)
-    phone_number = session_params.get("phone_number", None)
-    full_name = session_params.get("full_name", None)
-    if not email or not phone_number or not full_name:
-        response = {
-            "fulfillmentResponse": {
-                "messages": [
-                    {
-                        "text": {
-                            "text": [
-                                "I wasn't able to activate your membership with the information you gave me. Confirm your information and please try again."
-                            ]
-                        }
-                    }
-                ]
-            },
-            "targetPage": f"projects/{PROJECT_ID}/locations/{LOCATION}/agents/{AGENT_ID}/flows/{FLOW_IDS["activate_membership"]}/pages/{PAGE_IDS["collect_user_information"]}",
+
+    email = normalize_email(session_params.get("email", ""))
+    phone = normalize_phone(session_params.get("phone_number", ""))
+
+    if not email or not phone:
+        return jsonify(simple_response("Email and phone number are required."))
+
+    member_doc = find_member(email, phone)
+
+    if member_doc:
+        member_data = member_doc.to_dict()
+
+        message = f"Welcome back, {member_data.get('first_name', '')}!"
+
+        session_update = {
+            "is_authenticated": True,
+            "member_id": member_doc.id,
+            "email": member_data.get("email"),
+            "phone_number": member_data.get("phone_number"),
+            "first_name": member_data.get("first_name"),
+            "last_name": member_data.get("last_name"),
+            "membership_status": member_data.get("membership_status"),
+            "member_since": str(member_data.get("member_since")),
         }
+    else:
+        message = "No matching account found. Please check your email and phone number."
+        session_update = {"is_authenticated": False}
 
-    # Business logic (simulate DB lookup)
-    balance = lookup_balance(account_number)
-
-    # Build response
-    response = {
-        "fulfillmentResponse": {
-            "messages": [
-                {
-                    "text": {
-                        "text": [
-                            f"{customer_name}, your balance for account {account_number} is ${balance:.2f}."
-                        ]
-                    }
-                }
-            ]
-        },
-        "sessionInfo": {"parameters": {"membership_activated": "true"}},
-    }
-    return jsonify(response)
-
-
-def lookup_balance(account_number):
-    """Simulate database lookup."""
-    balances = {12345: 245.50, 67890: 1024.00, 11111: 0.00}
-    return balances.get(int(account_number), 0.00)
-
-
-def handle_make_payment(req):
-    session_params = req.get("sessionInfo", {}).get("parameters", {})
-    amount = session_params.get("payment_amount", 0)
     return jsonify(
         {
-            "fulfillmentResponse": {
-                "messages": [
-                    {
-                        "text": {
-                            "text": [f"Payment of ${amount} processed successfully!"]
-                        }
-                    }
-                ]
-            },
-            "sessionInfo": {
-                "parameters": {"payment_status": "completed", "payment_amount": amount}
-            },
+            "fulfillmentResponse": {"messages": [{"text": {"text": [message]}}]},
+            "sessionInfo": {"parameters": session_update},
         }
     )
 
 
-def handle_authenticate(req):
-    intent_params = req.get("intentInfo", {}).get("parameters", {})
-    account = intent_params.get("account_number", {}).get("resolvedValue", "")
-    # Simulate auth
-    authenticated = account in [12345, 67890, 11111]
+def handle_activate_membership(req):
+    session_params = req.get("sessionInfo", {}).get("parameters", {})
+
+    first_name = session_params.get("first_name", "")
+    last_name = session_params.get("last_name", "")
+    email = normalize_email(session_params.get("email", ""))
+    phone = normalize_phone(session_params.get("phone_number", ""))
+
+    if not email or not phone:
+        return jsonify(simple_response("Email and phone number are required."))
+
+    member_doc = find_member(email, phone)
+
+    if member_doc:
+        # Existing member → update
+        member_ref = member_doc.reference
+        member_ref.update(
+            {
+                "membership_status": "active",
+                "first_name": first_name,
+                "last_name": last_name,
+            }
+        )
+
+        updated_doc = member_ref.get()
+        member_data = updated_doc.to_dict()
+
+        message = f"Welcome back {member_data.get('first_name', '')}, your membership is now active."
+
+    else:
+        # New member → create (deterministic ID prevents duplicates)
+        doc_id = f"{email}_{phone}"
+        member_ref = db.collection("members").document(doc_id)
+
+        new_member = {
+            "email": email,
+            "phone_number": phone,
+            "first_name": first_name,
+            "last_name": last_name,
+            "member_since": firestore.SERVER_TIMESTAMP,
+            "membership_status": "active",
+        }
+
+        member_ref.set(new_member)
+
+        created_doc = member_ref.get()
+        member_data = created_doc.to_dict()
+
+        message = (
+            f"Welcome {first_name}, your membership has been created and activated!"
+        )
+
+    session_update = {
+        "is_authenticated": True,
+        "member_id": member_ref.id,
+        "email": member_data.get("email"),
+        "phone_number": member_data.get("phone_number"),
+        "first_name": member_data.get("first_name"),
+        "last_name": member_data.get("last_name"),
+        "membership_status": member_data.get("membership_status"),
+        "member_since": str(member_data.get("member_since")),
+    }
+
+    return jsonify(
+        {
+            "fulfillmentResponse": {"messages": [{"text": {"text": [message]}}]},
+            "sessionInfo": {"parameters": session_update},
+        }
+    )
+
+
+def handle_deactivate_membership(req):
+    session_params = req.get("sessionInfo", {}).get("parameters", {})
+
+    if not session_params.get("is_authenticated"):
+        return jsonify(
+            simple_response("You must log in before deactivating your membership.")
+        )
+
+    member_id = session_params.get("member_id")
+
+    if not member_id:
+        return jsonify(simple_response("Session expired. Please log in again."))
+
+    member_ref = db.collection("members").document(member_id)
+    member_ref.update({"membership_status": "inactive"})
+
+    updated_doc = member_ref.get()
+    member_data = updated_doc.to_dict()
+
     return jsonify(
         {
             "fulfillmentResponse": {
                 "messages": [
-                    {
-                        "text": {
-                            "text": [
-                                (
-                                    "Authentication successful!"
-                                    if authenticated
-                                    else "Account not found."
-                                )
-                            ]
-                        }
-                    }
+                    {"text": {"text": ["Your membership has been deactivated."]}}
                 ]
             },
             "sessionInfo": {
                 "parameters": {
-                    "authenticated": authenticated,
-                    "customer_name": "Alice" if authenticated else None,
+                    "membership_status": member_data.get("membership_status")
                 }
             },
         }
@@ -134,18 +202,4 @@ def handle_authenticate(req):
 
 def handle_default(req):
     tag = req.get("fulfillmentInfo", {}).get("tag", "unknown")
-    return jsonify(
-        {
-            "fulfillmentResponse": {
-                "messages": [
-                    {
-                        "text": {
-                            "text": [
-                                f"Webhook received tag: {tag}, but no handler found."
-                            ]
-                        }
-                    }
-                ]
-            }
-        }
-    )
+    return jsonify(simple_response(f"No handler found for tag: {tag}"))
